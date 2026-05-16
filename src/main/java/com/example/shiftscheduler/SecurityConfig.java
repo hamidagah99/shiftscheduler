@@ -1,4 +1,4 @@
-package com.example.shiftscheduler; // Make sure this matches
+package com.example.shiftscheduler;
 
 import com.vaadin.flow.spring.security.VaadinSecurityConfigurer;
 import org.springframework.beans.factory.annotation.Value;
@@ -17,12 +17,12 @@ import org.springframework.security.web.SecurityFilterChain;
 @Configuration
 public class SecurityConfig {
 
-    // Pulling credentials dynamically from application.properties
-    @Value("${app.admin.username}")
-    private String adminUsername;
+    // Pulling passwords  from application.properties
+    @Value("${app.boss.password}")
+    private String bossPassword;
 
-    @Value("${app.admin.password}")
-    private String adminPassword;
+    @Value("${app.emp.default-password}")
+    private String empPassword;
 
     @Bean
     public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
@@ -37,12 +37,15 @@ public class SecurityConfig {
     }
 
     @Bean
-    public InMemoryUserDetailsManager userDetailsService(PasswordEncoder passwordEncoder) {
-        UserDetails admin = User.withUsername(adminUsername)
-                .password(passwordEncoder.encode(adminPassword))
-                .roles("MANAGER")
-                .build();
+    public InMemoryUserDetailsManager userDetailsService(PasswordEncoder encoder) {
+        UserDetails boss = User.withUsername("boss").password(encoder.encode(bossPassword)).roles("MANAGER").build();
+        
+        UserDetails emp1 = User.withUsername("emp1").password(encoder.encode(empPassword)).roles("USER").build();
+        UserDetails emp2 = User.withUsername("emp2").password(encoder.encode(empPassword)).roles("USER").build();
+        UserDetails emp3 = User.withUsername("emp3").password(encoder.encode(empPassword)).roles("USER").build();
+        UserDetails emp4 = User.withUsername("emp4").password(encoder.encode(empPassword)).roles("USER").build();
+        UserDetails emp5 = User.withUsername("emp5").password(encoder.encode(empPassword)).roles("USER").build();
 
-        return new InMemoryUserDetailsManager(admin);
+        return new InMemoryUserDetailsManager(boss, emp1, emp2, emp3, emp4, emp5);
     }
 }
