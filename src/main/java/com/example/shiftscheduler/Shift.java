@@ -24,6 +24,6 @@ public class Shift {
     private String tradeNotes;         
 
     // Fields to handle the two-way swap offer
-    private Long offeredShiftId; 
+    private String offeredShiftIds; 
     private String offeredByUsername; 
 }

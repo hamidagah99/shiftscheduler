@@ -21,18 +21,22 @@ import jakarta.annotation.security.PermitAll;
 import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
+import java.time.DayOfWeek;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.util.List;
 import java.util.Optional;
+import java.util.stream.Collectors;
 
 @PermitAll
 @Route("")
 public class MainView extends VerticalLayout {
 
-    private LocalDate viewStartDate = LocalDate.now();
+    // Lock the start date to the Monday of the current week
+    private LocalDate viewStartDate = LocalDate.now().with(DayOfWeek.MONDAY);
+    
     private final VerticalLayout gridContainer = new VerticalLayout();
     private final ShiftRepository shiftRepo;
     private final EmployeeRepository empRepo;
@@ -44,12 +48,10 @@ public class MainView extends VerticalLayout {
         this.shiftRepo = shiftRepo;
         this.empRepo = empRepo;
 
-        // Get user permissions
         Authentication auth = SecurityContextHolder.getContext().getAuthentication();
         this.isManager = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_MANAGER"));
-        this.loggedInUsername = auth.getName(); // e.g., "boss", "emp1"
+        this.loggedInUsername = auth.getName(); 
 
-        // 1. Header
         HorizontalLayout header = new HorizontalLayout();
         header.setWidthFull();
         header.setJustifyContentMode(JustifyContentMode.BETWEEN);
@@ -58,18 +60,17 @@ public class MainView extends VerticalLayout {
         header.add(new RouterLink("➡️ Zur Tauschbörse", SwapBoardView.class));
         add(header);
 
-        // 2. Add Shift Form (ONLY VISIBLE TO MANAGER)
         if (isManager) {
             buildAddShiftForm();
         }
 
-        // 3. Grid Container
         gridContainer.setWidthFull();
         add(gridContainer);
         buildMatrixGrid();
     }
 
     private void buildAddShiftForm() {
+        // 1. Standard Shift Buttons 
         ComboBox<Employee> employeeSelect = new ComboBox<>("Mitarbeiter");
         employeeSelect.setItems(empRepo.findAll());
         employeeSelect.setItemLabelGenerator(Employee::getName);
@@ -93,28 +94,80 @@ public class MainView extends VerticalLayout {
         addShiftButton(shiftButtons2, "S4", "11:00", "14:30", employeeSelect, dateSelect);
 
         add(new H3("Schicht hinzufügen (Nur Boss):"), new HorizontalLayout(employeeSelect, dateSelect), shiftButtons1, shiftButtons2);
+
+        // 2. Urlaub / Krank 
+        H3 ukTitle = new H3("Urlaub / Krankheit eintragen (Zeitraum):");
+        ComboBox<Employee> ukEmpSelect = new ComboBox<>("Mitarbeiter");
+        ukEmpSelect.setItems(empRepo.findAll());
+        ukEmpSelect.setItemLabelGenerator(Employee::getName);
+
+        DatePicker startDateSelect = new DatePicker("Von (Datum)");
+        DatePicker endDateSelect = new DatePicker("Bis (Datum)");
+        ComboBox<String> typeSelect = new ComboBox<>("Typ");
+        typeSelect.setItems("U", "K");
+
+        Button addUkBtn = new Button("Eintragen", e -> {
+            if (ukEmpSelect.getValue() == null || startDateSelect.getValue() == null || endDateSelect.getValue() == null || typeSelect.getValue() == null) {
+                Notification.show("Bitte alle Felder ausfüllen!");
+                return;
+            }
+            LocalDate start = startDateSelect.getValue();
+            LocalDate end = endDateSelect.getValue();
+            
+            if (end.isBefore(start)) {
+                Notification.show("Das Enddatum darf nicht vor dem Startdatum liegen!").addThemeVariants(NotificationVariant.LUMO_ERROR);
+                return;
+            }
+
+            // Loop through the dates and add U/K
+            for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
+                // Find and delete any existing shifts for this person on this day
+                LocalDate finalD = d;
+                List<Shift> existingShifts = shiftRepo.findAll().stream()
+                        .filter(s -> s.getEmployee().getId().equals(ukEmpSelect.getValue().getId()))
+                        .filter(s -> s.getStartTime().toLocalDate().equals(finalD))
+                        .collect(Collectors.toList());
+                shiftRepo.deleteAll(existingShifts);
+
+                // Create the U/K block
+                Shift s = new Shift();
+                s.setLabel(typeSelect.getValue());
+                s.setEmployee(ukEmpSelect.getValue());
+                s.setStartTime(d.atTime(0, 0)); // Start of day
+                s.setEndTime(d.atTime(23, 59)); // End of day
+                shiftRepo.save(s);
+            }
+            buildMatrixGrid(); // Refresh grid
+            Notification.show("Zeitraum erfolgreich eingetragen!").addThemeVariants(NotificationVariant.LUMO_SUCCESS);
+        });
+        addUkBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_ERROR);
+
+        add(ukTitle, new HorizontalLayout(ukEmpSelect, startDateSelect, endDateSelect, typeSelect, addUkBtn));
     }
 
     private void buildMatrixGrid() {
         gridContainer.removeAll();
 
-        // Pagination Controls
+        // Format the Week Label
+        LocalDate endOfWeek = viewStartDate.plusDays(6);
+        DateTimeFormatter fmt = DateTimeFormatter.ofPattern("dd.MM");
+        H3 weekLabel = new H3("Woche: " + viewStartDate.format(fmt) + " - " + endOfWeek.format(fmt));
+
         HorizontalLayout weekControls = new HorizontalLayout();
         weekControls.setAlignItems(Alignment.CENTER);
         Button prevWeek = new Button("⬅️ Vorherige Woche", e -> { viewStartDate = viewStartDate.minusDays(7); buildMatrixGrid(); });
         Button nextWeek = new Button("Nächste Woche ➡️", e -> { viewStartDate = viewStartDate.plusDays(7); buildMatrixGrid(); });
-        H3 weekLabel = new H3("Woche: " + viewStartDate.format(DateTimeFormatter.ofPattern("dd.MM.yyyy")));
         weekControls.add(prevWeek, weekLabel, nextWeek);
 
         Grid<Employee> grid = new Grid<>(Employee.class, false);
         grid.addColumn(Employee::getName).setHeader("Mitarbeiter").setFrozen(true).setAutoWidth(true);
 
         List<Shift> allShifts = shiftRepo.findAll();
+        String[] dayNames = {"Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"};
 
-        // Build 7 columns dynamically
         for (int i = 0; i < 7; i++) {
             LocalDate currentDate = viewStartDate.plusDays(i);
-            String headerDate = currentDate.format(DateTimeFormatter.ofPattern("dd.MM"));
+            String headerDate = dayNames[i] + " " + currentDate.format(fmt);
 
             grid.addComponentColumn(emp -> {
                 Optional<Shift> shiftOpt = allShifts.stream()
@@ -125,7 +178,11 @@ public class MainView extends VerticalLayout {
                 if (shiftOpt.isPresent()) {
                     Shift shift = shiftOpt.get();
                     Button shiftBtn = new Button(shift.getLabel());
-                    if (shift.isTradeOpen()) {
+                    
+                    // Visual styling for U and K
+                    if (shift.getLabel().equals("U") || shift.getLabel().equals("K")) {
+                        shiftBtn.addThemeVariants(ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_PRIMARY);
+                    } else if (shift.isTradeOpen()) {
                         shiftBtn.addThemeVariants(ButtonVariant.LUMO_SUCCESS, ButtonVariant.LUMO_PRIMARY);
                     } else {
                         shiftBtn.addThemeVariants(ButtonVariant.LUMO_CONTRAST, ButtonVariant.LUMO_PRIMARY);
@@ -146,7 +203,9 @@ public class MainView extends VerticalLayout {
     private void openShiftActionsDialog(Shift shift) {
         Dialog dialog = new Dialog();
         
-        boolean ownsShift = shift.getEmployee().getName().toLowerCase().replace(" ", "").contains(loggedInUsername);
+        String searchName = loggedInUsername.replace("emp", "employee ");
+        boolean ownsShift = shift.getEmployee().getName().toLowerCase().contains(loggedInUsername) ||
+                            shift.getEmployee().getName().toLowerCase().contains(searchName);
 
         if (!isManager && !ownsShift) {
             dialog.add(new Span("Sie haben keine Berechtigung für diese Schicht."));
@@ -154,73 +213,35 @@ public class MainView extends VerticalLayout {
             return;
         }
 
+        dialog.setHeaderTitle("Optionen für " + shift.getLabel());
         VerticalLayout dialogLayout = new VerticalLayout();
 
-        //  Check if there is an incoming swap offer
-        if (ownsShift && shift.getOfferedShiftId() != null) {
-            Shift offeredShift = shiftRepo.findById(shift.getOfferedShiftId()).orElse(null);
-            if (offeredShift != null) {
-                dialog.setHeaderTitle("Tauschangebot erhalten!");
-                dialogLayout.add(new Span("Benutzer '" + shift.getOfferedByUsername() + "' bietet dir folgende Schicht an:"));
-                dialogLayout.add(new H3(offeredShift.getLabel() + " am " + offeredShift.getStartTime().toLocalDate()));
-                
-                Button acceptBtn = new Button("Tausch Bestätigen", e -> {
-                    // Swap the employees
-                    Employee myEmp = shift.getEmployee();
-                    Employee theirEmp = offeredShift.getEmployee();
-                    
-                    shift.setEmployee(theirEmp);
-                    offeredShift.setEmployee(myEmp);
-                    
-                    // Clear all trade flags
+        // 1. Trade Board Controls
+        if (ownsShift) {
+            if (shift.isTradeOpen()) {
+                Button cancelTradeBtn = new Button("Vom Tauschbrett entfernen", e -> {
                     shift.setTradeOpen(false);
                     shift.setTradeNotes("");
-                    shift.setOfferedShiftId(null);
-                    shift.setOfferedByUsername(null);
-                    
-                    offeredShift.setTradeOpen(false);
-                    offeredShift.setTradeNotes("");
-                    offeredShift.setOfferedShiftId(null);
-                    offeredShift.setOfferedByUsername(null);
-                    
-                    shiftRepo.save(shift);
-                    shiftRepo.save(offeredShift);
-                    
-                    dialog.close();
-                    getUI().ifPresent(ui -> ui.getPage().reload());
-                });
-                acceptBtn.addThemeVariants(ButtonVariant.LUMO_SUCCESS, ButtonVariant.LUMO_PRIMARY);
-                
-                Button rejectBtn = new Button("Ablehnen", e -> {
-                    shift.setOfferedShiftId(null);
+                    shift.setOfferedShiftIds(null);
                     shift.setOfferedByUsername(null);
                     shiftRepo.save(shift);
-                    dialog.close();
                     getUI().ifPresent(ui -> ui.getPage().reload());
                 });
-                rejectBtn.addThemeVariants(ButtonVariant.LUMO_ERROR);
-                
-                dialogLayout.add(new HorizontalLayout(acceptBtn, rejectBtn));
-                dialog.add(dialogLayout);
-                dialog.open();
-                return; // Stop here so they must address the offer
+                cancelTradeBtn.addThemeVariants(ButtonVariant.LUMO_ERROR);
+                dialogLayout.add(cancelTradeBtn);
+            } else {
+                TextField notesField = new TextField("Bedingung für Tausch");
+                Button tradeBtn = new Button("🤝 Auf Tauschbörse", e -> {
+                    shift.setTradeOpen(true);
+                    shift.setTradeNotes(notesField.getValue());
+                    shiftRepo.save(shift);
+                    getUI().ifPresent(ui -> ui.getPage().reload());
+                });
+                dialogLayout.add(new HorizontalLayout(notesField, tradeBtn));
             }
         }
 
-        // Standard Actions (if no offer is pending)
-        dialog.setHeaderTitle("Optionen für " + shift.getLabel());
-
-        if (ownsShift) {
-            TextField notesField = new TextField("Bedingung für Tausch");
-            Button tradeBtn = new Button("🤝 Auf Tauschbörse", e -> {
-                shift.setTradeOpen(true);
-                shift.setTradeNotes(notesField.getValue());
-                shiftRepo.save(shift);
-                getUI().ifPresent(ui -> ui.getPage().reload());
-            });
-            dialogLayout.add(new HorizontalLayout(notesField, tradeBtn));
-        }
-
+        // 2. Manager Only Actions
         if (isManager) {
             ComboBox<Employee> newEmpSelect = new ComboBox<>("Mitarbeiter ändern");
             newEmpSelect.setItems(empRepo.findAll());
@@ -235,7 +256,7 @@ public class MainView extends VerticalLayout {
                 }
             });
 
-            Button deleteBtn = new Button("🗑️ Schicht Löschen", e -> {
+            Button deleteBtn = new Button("🗑️ Löschen", e -> {
                 shiftRepo.delete(shift);
                 getUI().ifPresent(ui -> ui.getPage().reload());
             });
@@ -261,7 +282,7 @@ public class MainView extends VerticalLayout {
                 s.setStartTime(sTime);
                 s.setEndTime(eTime);
                 shiftRepo.save(s);
-                buildMatrixGrid(); // Refresh grid instantly without full page reload
+                buildMatrixGrid(); 
             } else {
                 Notification n = Notification.show("Mitarbeiter hat bereits eine Schicht!");
                 n.addThemeVariants(NotificationVariant.LUMO_ERROR);
