@@ -1,5 +1,6 @@
 package com.example.shiftscheduler;
 
+import com.vaadin.flow.component.Component;
 import com.vaadin.flow.component.button.Button;
 import com.vaadin.flow.component.button.ButtonVariant;
 import com.vaadin.flow.component.combobox.ComboBox;
@@ -22,6 +23,7 @@ import org.springframework.security.core.Authentication;
 import org.springframework.security.core.context.SecurityContextHolder;
 
 import java.time.DayOfWeek;
+import java.time.Duration;
 import java.time.LocalDate;
 import java.time.LocalDateTime;
 import java.time.LocalTime;
@@ -34,7 +36,6 @@ import java.util.stream.Collectors;
 @Route("")
 public class MainView extends VerticalLayout {
 
-    // Lock the start date to the Monday of the current week
     private LocalDate viewStartDate = LocalDate.now().with(DayOfWeek.MONDAY);
     
     private final VerticalLayout gridContainer = new VerticalLayout();
@@ -52,12 +53,31 @@ public class MainView extends VerticalLayout {
         this.isManager = auth.getAuthorities().stream().anyMatch(a -> a.getAuthority().equals("ROLE_MANAGER"));
         this.loggedInUsername = auth.getName(); 
 
+        getElement().executeJs(
+            "if (!document.getElementById('print-style')) {" +
+            "  const style = document.createElement('style');" +
+            "  style.id = 'print-style';" +
+            "  style.innerHTML = '@media print { .no-print { display: none !important; } }';" +
+            "  document.head.appendChild(style);" +
+            "}"
+        );
+
         HorizontalLayout header = new HorizontalLayout();
         header.setWidthFull();
         header.setJustifyContentMode(JustifyContentMode.BETWEEN);
         header.setAlignItems(Alignment.CENTER);
         header.add(new H1("Dienstplan"));
-        header.add(new RouterLink("➡️ Zur Tauschbörse", SwapBoardView.class));
+
+        Button printBtn = new Button("🖨️ Als PDF Drucken", e -> {
+            getUI().ifPresent(ui -> ui.getPage().executeJs("window.print();"));
+        });
+        printBtn.addThemeVariants(ButtonVariant.LUMO_CONTRAST);
+
+        HorizontalLayout headerLinks = new HorizontalLayout(printBtn, new RouterLink("➡️ Zur Tauschbörse", SwapBoardView.class));
+        headerLinks.setAlignItems(Alignment.CENTER);
+        header.add(headerLinks);
+        
+        header.addClassName("no-print"); 
         add(header);
 
         if (isManager) {
@@ -70,7 +90,10 @@ public class MainView extends VerticalLayout {
     }
 
     private void buildAddShiftForm() {
-        // 1. Standard Shift Buttons 
+        VerticalLayout controlsLayout = new VerticalLayout();
+        controlsLayout.setPadding(false);
+        controlsLayout.addClassName("no-print");
+
         ComboBox<Employee> employeeSelect = new ComboBox<>("Mitarbeiter");
         employeeSelect.setItems(empRepo.findAll());
         employeeSelect.setItemLabelGenerator(Employee::getName);
@@ -93,16 +116,15 @@ public class MainView extends VerticalLayout {
         addShiftButton(shiftButtons2, "s2", "17:00", "20:00", employeeSelect, dateSelect);
         addShiftButton(shiftButtons2, "S4", "11:00", "14:30", employeeSelect, dateSelect);
 
-        add(new H3("Schicht hinzufügen (Nur Boss):"), new HorizontalLayout(employeeSelect, dateSelect), shiftButtons1, shiftButtons2);
+        controlsLayout.add(new H3("Schicht hinzufügen (Nur Boss):"), new HorizontalLayout(employeeSelect, dateSelect), shiftButtons1, shiftButtons2);
 
-        // 2. Urlaub / Krank 
         H3 ukTitle = new H3("Urlaub / Krankheit eintragen (Zeitraum):");
         ComboBox<Employee> ukEmpSelect = new ComboBox<>("Mitarbeiter");
         ukEmpSelect.setItems(empRepo.findAll());
         ukEmpSelect.setItemLabelGenerator(Employee::getName);
 
-        DatePicker startDateSelect = new DatePicker("Von (Datum)");
-        DatePicker endDateSelect = new DatePicker("Bis (Datum)");
+        DatePicker startDateSelect = new DatePicker("Von");
+        DatePicker endDateSelect = new DatePicker("Bis");
         ComboBox<String> typeSelect = new ComboBox<>("Typ");
         typeSelect.setItems("U", "K");
 
@@ -115,13 +137,11 @@ public class MainView extends VerticalLayout {
             LocalDate end = endDateSelect.getValue();
             
             if (end.isBefore(start)) {
-                Notification.show("Das Enddatum darf nicht vor dem Startdatum liegen!").addThemeVariants(NotificationVariant.LUMO_ERROR);
+                Notification.show("Fehler: Enddatum liegt vor Startdatum!").addThemeVariants(NotificationVariant.LUMO_ERROR);
                 return;
             }
 
-            // Loop through the dates and add U/K
             for (LocalDate d = start; !d.isAfter(end); d = d.plusDays(1)) {
-                // Find and delete any existing shifts for this person on this day
                 LocalDate finalD = d;
                 List<Shift> existingShifts = shiftRepo.findAll().stream()
                         .filter(s -> s.getEmployee().getId().equals(ukEmpSelect.getValue().getId()))
@@ -129,47 +149,63 @@ public class MainView extends VerticalLayout {
                         .collect(Collectors.toList());
                 shiftRepo.deleteAll(existingShifts);
 
-                // Create the U/K block
                 Shift s = new Shift();
                 s.setLabel(typeSelect.getValue());
                 s.setEmployee(ukEmpSelect.getValue());
-                s.setStartTime(d.atTime(0, 0)); // Start of day
-                s.setEndTime(d.atTime(23, 59)); // End of day
+                s.setStartTime(d.atTime(0, 0)); 
+                s.setEndTime(d.atTime(23, 59)); 
                 shiftRepo.save(s);
             }
-            buildMatrixGrid(); // Refresh grid
+            buildMatrixGrid(); 
             Notification.show("Zeitraum erfolgreich eingetragen!").addThemeVariants(NotificationVariant.LUMO_SUCCESS);
         });
         addUkBtn.addThemeVariants(ButtonVariant.LUMO_PRIMARY, ButtonVariant.LUMO_ERROR);
 
-        add(ukTitle, new HorizontalLayout(ukEmpSelect, startDateSelect, endDateSelect, typeSelect, addUkBtn));
+        controlsLayout.add(ukTitle, new HorizontalLayout(ukEmpSelect, startDateSelect, endDateSelect, typeSelect, addUkBtn));
+        add(controlsLayout);
     }
 
     private void buildMatrixGrid() {
         gridContainer.removeAll();
 
-        // Format the Week Label
         LocalDate endOfWeek = viewStartDate.plusDays(6);
         DateTimeFormatter fmt = DateTimeFormatter.ofPattern("dd.MM");
         H3 weekLabel = new H3("Woche: " + viewStartDate.format(fmt) + " - " + endOfWeek.format(fmt));
 
         HorizontalLayout weekControls = new HorizontalLayout();
         weekControls.setAlignItems(Alignment.CENTER);
+        
         Button prevWeek = new Button("⬅️ Vorherige Woche", e -> { viewStartDate = viewStartDate.minusDays(7); buildMatrixGrid(); });
         Button nextWeek = new Button("Nächste Woche ➡️", e -> { viewStartDate = viewStartDate.plusDays(7); buildMatrixGrid(); });
+        
+        prevWeek.addClassName("no-print");
+        nextWeek.addClassName("no-print");
+        
         weekControls.add(prevWeek, weekLabel, nextWeek);
 
         Grid<Employee> grid = new Grid<>(Employee.class, false);
-        grid.addColumn(Employee::getName).setHeader("Mitarbeiter").setFrozen(true).setAutoWidth(true);
+        grid.setMaxWidth("1050px"); 
+        
+        // Fix for the cut-off footer row: force grid to show all rows natively
+        grid.setAllRowsVisible(true); 
+
+        grid.addColumn(Employee::getName).setHeader("Mitarbeiter").setFrozen(true).setWidth("140px").setFlexGrow(0);
+
+        if (isManager) {
+            grid.addColumn(emp -> calculateMonthlyHours(emp, shiftRepo.findAll()))
+                .setHeader("Stunden")
+                .setFrozen(true)
+                .setWidth("100px").setFlexGrow(0);
+        }
 
         List<Shift> allShifts = shiftRepo.findAll();
         String[] dayNames = {"Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"};
 
         for (int i = 0; i < 7; i++) {
             LocalDate currentDate = viewStartDate.plusDays(i);
-            String headerDate = dayNames[i] + " " + currentDate.format(fmt);
+            String headerDate = dayNames[i];
 
-            grid.addComponentColumn(emp -> {
+            Grid.Column<Employee> dayCol = grid.addComponentColumn(emp -> {
                 Optional<Shift> shiftOpt = allShifts.stream()
                         .filter(s -> s.getEmployee().getId().equals(emp.getId()))
                         .filter(s -> s.getStartTime().toLocalDate().equals(currentDate))
@@ -179,7 +215,6 @@ public class MainView extends VerticalLayout {
                     Shift shift = shiftOpt.get();
                     Button shiftBtn = new Button(shift.getLabel());
                     
-                    // Visual styling for U and K
                     if (shift.getLabel().equals("U") || shift.getLabel().equals("K")) {
                         shiftBtn.addThemeVariants(ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_PRIMARY);
                     } else if (shift.isTradeOpen()) {
@@ -193,16 +228,89 @@ public class MainView extends VerticalLayout {
                 } else {
                     return new Span("-");
                 }
-            }).setHeader(headerDate).setTextAlign(ColumnTextAlign.CENTER).setAutoWidth(true);
+            }).setHeader(headerDate).setTextAlign(ColumnTextAlign.CENTER).setWidth("90px").setFlexGrow(0);
+
+            if (isManager) {
+                dayCol.setFooter(getCoverageBadge(currentDate, allShifts));
+            }
         }
 
         grid.setItems(empRepo.findAll());
         gridContainer.add(weekControls, grid);
     }
 
+    private String calculateMonthlyHours(Employee emp, List<Shift> allShifts) {
+        LocalDate startOfMonth = viewStartDate.withDayOfMonth(1);
+        LocalDate endOfMonth = viewStartDate.withDayOfMonth(viewStartDate.lengthOfMonth());
+        
+        double totalHours = 0;
+        for (Shift s : allShifts) {
+            if (s.getEmployee().getId().equals(emp.getId()) && !s.getLabel().equals("U") && !s.getLabel().equals("K")) {
+                LocalDate shiftDate = s.getStartTime().toLocalDate();
+                if (!shiftDate.isBefore(startOfMonth) && !shiftDate.isAfter(endOfMonth)) {
+                    long minutes = Duration.between(s.getStartTime(), s.getEndTime()).toMinutes();
+                    double hours = minutes / 60.0;
+                    if (hours > 6.0) hours -= 0.5; 
+                    totalHours += hours;
+                }
+            }
+        }
+        return String.format("%.1f Std", totalHours);
+    }
+
+
+    private Component getCoverageBadge(LocalDate date, List<Shift> allShifts) {
+        int morning = 0; 
+        int mid = 0;     
+        int late = 0;    
+
+        for (Shift s : allShifts) {
+            if (s.getStartTime().toLocalDate().equals(date) && !s.getLabel().equals("U") && !s.getLabel().equals("K")) {
+                LocalTime st = s.getStartTime().toLocalTime();
+                LocalTime et = s.getEndTime().toLocalTime();
+                
+                if (st.isBefore(LocalTime.of(11, 30)) && et.isAfter(LocalTime.of(7, 30))) morning++;
+                if (st.isBefore(LocalTime.of(14, 0)) && et.isAfter(LocalTime.of(11, 30))) mid++;
+                if (st.isBefore(LocalTime.of(20, 0)) && et.isAfter(LocalTime.of(14, 0))) late++;
+            }
+        }
+        
+        boolean hasWarning = morning < 1 || mid < 2 || late < 1;
+        
+        if (hasWarning) {
+            Button warningBtn = new Button("⚠️ Fehlt Personal");
+            warningBtn.addThemeVariants(ButtonVariant.LUMO_SMALL, ButtonVariant.LUMO_ERROR, ButtonVariant.LUMO_TERTIARY);
+            warningBtn.getStyle().set("font-size", "0.75em").set("padding", "0");
+            
+            //  Create frozen "final" copies so Java allows them inside the popup logic
+            final int finalMorning = morning;
+            final int finalMid = mid;
+            final int finalLate = late;
+            
+            warningBtn.addClickListener(e -> {
+                Dialog d = new Dialog();
+                d.setHeaderTitle("Besetzungslücke am " + date.format(DateTimeFormatter.ofPattern("dd.MM.yyyy")));
+                VerticalLayout layout = new VerticalLayout();
+                
+                if (finalMorning < 1) layout.add(new Span("❌ Frühschicht (bis 11:30): 1 benötigt, 0 eingeteilt."));
+                if (finalMid < 2) layout.add(new Span("❌ Mittagschicht (11:30 - 14:00): 2 benötigt, " + finalMid + " eingeteilt."));
+                if (finalLate < 1) layout.add(new Span("❌ Spätschicht (ab 14:00): 1 benötigt, 0 eingeteilt."));
+                
+                Button closeBtn = new Button("Schließen", click -> d.close());
+                layout.add(closeBtn);
+                d.add(layout);
+                d.open();
+            });
+            return warningBtn;
+        }
+        
+        Span okSpan = new Span("✅ OK");
+        okSpan.getStyle().set("color", "green").set("font-size", "0.8em");
+        return okSpan;
+    }
+
     private void openShiftActionsDialog(Shift shift) {
         Dialog dialog = new Dialog();
-        
         String searchName = loggedInUsername.replace("emp", "employee ");
         boolean ownsShift = shift.getEmployee().getName().toLowerCase().contains(loggedInUsername) ||
                             shift.getEmployee().getName().toLowerCase().contains(searchName);
@@ -216,7 +324,6 @@ public class MainView extends VerticalLayout {
         dialog.setHeaderTitle("Optionen für " + shift.getLabel());
         VerticalLayout dialogLayout = new VerticalLayout();
 
-        // 1. Trade Board Controls
         if (ownsShift) {
             if (shift.isTradeOpen()) {
                 Button cancelTradeBtn = new Button("Vom Tauschbrett entfernen", e -> {
@@ -241,7 +348,6 @@ public class MainView extends VerticalLayout {
             }
         }
 
-        // 2. Manager Only Actions
         if (isManager) {
             ComboBox<Employee> newEmpSelect = new ComboBox<>("Mitarbeiter ändern");
             newEmpSelect.setItems(empRepo.findAll());
